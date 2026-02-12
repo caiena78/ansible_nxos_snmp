@@ -33,21 +33,7 @@
       var: netbox_response
 
 
-  # - name: Extract and format ACL lines
-  #   set_fact:
-  #     acl_lines: >-
-  #       {{
-  #         netbox_response.json.results
-  #         | map(attribute='address')          
-  #         | map('split', '/')         
-  #         | map('first')              
-  #         | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))         
-  #         | map('reverse')           
-  #         | map('join', ' permit ip host ')  
-  #         | list
-  #       }}
-
-
+ 
   - name: Extract and format ACL lines
     set_fact:
       acl_lines: >-

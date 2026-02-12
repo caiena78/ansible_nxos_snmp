@@ -1,0 +1,206 @@
+---  
+
+  - name: Include netbox_getsite
+    include_role:
+      name: netbox_getsite
+      #netbox_site_response
+
+
+
+  - name: Set SNMP location
+    set_fact:
+      SNMP_LOCATION: "{{ netbox_site_response.json.custom_fields.SNMP_LOCATION}}"
+    when:
+      - netbox_site_response.json is defined
+      - netbox_site_response.json | length > 0
+      - netbox_site_response.json.custom_fields is defined
+      - netbox_site_response.json.custom_fields.SNMP_LOCATION is defined # Ensure the 'syslog' custom field exists
+      - netbox_site_response.json.custom_fields.SNMP_LOCATION | length > 0 # Ensure the 'syslog' list is not empty
+      - netbox_site_response.json.custom_fields.SNMP_LOCATION is defined # Ensure the 'ip' key exists in the first element
+
+  - name: Get IPs tagged with snmp_acl_allow from NetBox
+    uri:
+      url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ snmp_acl_tag }}"
+      method: GET
+      headers:
+        Authorization: "Token {{ netbox_token }}"
+        Accept: "application/json"
+      return_content: yes
+    register: netbox_response
+
+  - name: netbox response
+    debug:
+      var: netbox_response
+
+
+  # - name: Extract and format ACL lines
+  #   set_fact:
+  #     acl_lines: >-
+  #       {{
+  #         netbox_response.json.results
+  #         | map(attribute='address')          
+  #         | map('split', '/')         
+  #         | map('first')              
+  #         | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))         
+  #         | map('reverse')           
+  #         | map('join', ' permit ip host ')  
+  #         | list
+  #       }}
+
+
+  - name: Extract and format ACL lines
+    set_fact:
+      acl_lines: >-
+        {{
+          netbox_response.json.results
+          | map(attribute='address')
+          | map('split', '/')
+          | map('first')
+          | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))
+          | map('reverse')
+          | map('join', ' permit ip host ')
+          | map('regex_replace', '^', '')  
+          | map('regex_replace', '$', ' any')
+          | list
+        }}
+
+
+
+  - name: Debug formatted ACL lines
+    debug:
+      var: acl_lines
+
+
+
+  - name: Check if ACL exists
+    nxos_command:
+      commands:
+        - "show running-config | include 'ip access-list {{ snmp_acl_name }}'"
+    register: acl_check
+
+  - name: Remove ACL if it exists
+    nxos_config:
+      lines:
+        - "no ip access-list {{ snmp_acl_name }}"
+    when: acl_check.stdout[0] != ""
+
+
+
+  - name: Create/Update ACL for SNMP
+    nxos_config:
+      lines: "{{ acl_lines }}"
+      parents: ['ip access-list {{ snmp_acl_name }}']
+      match: none
+      replace: block
+
+  - name: Set SNMP location
+    nxos_config:
+      lines:
+        - snmp-server location {{ SNMP_LOCATION }}
+      before:
+        - no snmp-server location
+      match: strict
+      replace: block
+    ignore_errors: true
+
+  - name: Set SNMP  globalEnforcePriv
+    nxos_config:
+       lines:
+         - snmp-server globalEnforcePriv 
+    ignore_errors: true
+
+
+
+  - name: add snmp user {{ snmp_ro_user }}
+    nxos_config:
+      lines:
+        - snmp-server user {{ snmp_ro_user }} {{ snmp_nexus_ro_group }} auth sha {{ snmp_auth_passphrase_ro }} priv aes-128 {{ snmp_priv_passphrase_ro }}	       
+    ignore_errors: true
+
+
+  - name: DEBUG | snmp user 
+    debug:
+      msg:
+        - snmp-server user {{ snmp_ro_user }} {{ snmp_nexus_ro_group }} auth sha {{ snmp_auth_passphrase_ro }} priv aes-128 {{ snmp_priv_passphrase_ro }}
+
+
+  - name: Set SNMP user {{ snmp_ro_user  }} ACL
+    nxos_config:
+       lines:
+         - snmp-server user  {{ snmp_ro_user  }} use-ipv4acl {{ snmp_acl_name }}
+       match: strict
+       replace: block
+    ignore_errors: true
+
+
+  - name: Set SNMP user {{ snmp_rw_user }}
+    nxos_config:
+       lines:
+         - snmp-server user {{ snmp_rw_user }} {{ snmp_nexus_rw_group }} auth sha {{ snmp_auth_passphrase_rw }} priv aes-128 {{ snmp_priv_passphrase_rw }}	
+       match: strict
+       replace: block
+    ignore_errors: true
+
+
+  - name: Set SNMP user {{ snmp_rw_user }} ACL
+    nxos_config:
+       lines:
+         - snmp-server user  {{ snmp_rw_user }} use-ipv4acl {{ snmp_acl_name }}
+       match: strict
+       replace: block
+    ignore_errors: true
+
+ 
+
+  
+  - name: Set SNMP user catctruser
+    nxos_config:
+       lines:
+         - snmp-server user {{ CAT_SNMP_USER }} network-admin auth {{ CAT_SNMP_AUTH_PROTO }} {{CAT_SNMP_AUTH_KEY}} priv {{CAT_SNMP_PRIV_PROTO}}-{{CAT_SNMP_PRIV_BITS}} {{CAT_SNMP_PRIV_KEY}}
+       match: strict       
+       replace: block
+    ignore_errors: true
+
+
+  - name: Set SNMP user catctruser ACL
+    nxos_config:
+       lines:
+         - snmp-server user  {{ CAT_SNMP_USER }} use-ipv4acl {{ snmp_acl_name }}
+       match: strict
+       replace: block
+    ignore_errors: true
+
+
+  - name: Set SNMP user admin ACL
+    nxos_config:
+       lines:
+         - snmp-server user  admin use-ipv4acl {{ snmp_acl_name }}
+       match: strict
+       replace: block
+    ignore_errors: true
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+

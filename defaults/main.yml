@@ -1,0 +1,28 @@
+---  
+netbox_url: "https://netbox.example.com"
+netbox_token: "your_token_here"
+netbox_validate_certs: false
+snmp_nexus_rw_group: "network-admin"
+snmp_nexus_ro_group: "network-operator"
+snmp_rw_user: "RWuser"
+snmp_ro_user: "ROuser"
+snmp_auth_passphrase_rw: "Password"
+snmp_priv_passphrase_rw: "Password"
+snmp_auth_passphrase_ro: "Password"
+snmp_priv_passphrase_ro: "Password"
+snmp_acl_name: "MANAGEMENT_ACL"
+
+CAT_SNMP_VIEW_NAME: cat_view
+CAT_SNMP_VIEW_OID: sample
+
+CAT_SNMP_GROUP: cat_group
+
+CAT_SNMP_USER: <user>
+CAT_SNMP_AUTH_PROTO: <sha>
+CAT_SNMP_AUTH_KEY: <authkey>
+
+CAT_SNMP_PRIV_PROTO: aes
+CAT_SNMP_PRIV_BITS: 128
+CAT_SNMP_PRIV_KEY: <prive_key>
+
+

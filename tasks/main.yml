@@ -1,192 +1,426 @@
----  
+---
 
-  - name: Include netbox_getsite
-    include_role:
-      name: netbox_getsite
-      #netbox_site_response
+- name: Include netbox_getsite
+  include_role:
+    name: netbox_getsite
+    # expects: netbox_site_response
 
+# ------------------------------------------------------------
+# Set SNMP location from NetBox (custom field SNMP_LOCATION)
+# ------------------------------------------------------------
+- name: Set SNMP location (fact) from NetBox
+  set_fact:
+    SNMP_LOCATION: "{{ netbox_site_response.json.custom_fields.SNMP_LOCATION }}"
+  when:
+    - netbox_site_response.json is defined
+    - netbox_site_response.json | length > 0
+    - netbox_site_response.json.custom_fields is defined
+    - netbox_site_response.json.custom_fields.SNMP_LOCATION is defined
+    - netbox_site_response.json.custom_fields.SNMP_LOCATION | length > 0
 
+# ------------------------------------------------------------
+# Pull ACL IPs from NetBox by tag (nxos_snmp.acl.tag)
+# ------------------------------------------------------------
+- name: Get IPs tagged with {{ nxos_snmp.acl.tag }} from NetBox
+  uri:
+    url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ nxos_snmp.acl.tag }}"
+    method: GET
+    headers:
+      Authorization: "Token {{ netbox_token }}"
+      Accept: "application/json"
+    return_content: yes
+  register: netbox_response
 
-  - name: Set SNMP location
-    set_fact:
-      SNMP_LOCATION: "{{ netbox_site_response.json.custom_fields.SNMP_LOCATION}}"
-    when:
-      - netbox_site_response.json is defined
-      - netbox_site_response.json | length > 0
-      - netbox_site_response.json.custom_fields is defined
-      - netbox_site_response.json.custom_fields.SNMP_LOCATION is defined # Ensure the 'syslog' custom field exists
-      - netbox_site_response.json.custom_fields.SNMP_LOCATION | length > 0 # Ensure the 'syslog' list is not empty
-      - netbox_site_response.json.custom_fields.SNMP_LOCATION is defined # Ensure the 'ip' key exists in the first element
+- name: netbox response
+  debug:
+    var: netbox_response
 
-  - name: Get IPs tagged with snmp_acl_allow from NetBox
-    uri:
-      url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ snmp_acl_tag }}"
-      method: GET
-      headers:
-        Authorization: "Token {{ netbox_token }}"
-        Accept: "application/json"
-      return_content: yes
-    register: netbox_response
+# ------------------------------------------------------------
+# Build ACL lines: 10 permit ip host <ip> any, 20 permit..., etc.
+# ------------------------------------------------------------
+- name: Extract and format ACL lines
+  set_fact:
+    acl_lines: >-
+      {{
+        netbox_response.json.results
+        | map(attribute='address')
+        | map('split', '/')
+        | map('first')
+        | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))
+        | map('reverse')
+        | map('join', ' permit ip host ')
+        | map('regex_replace', '$', ' any')
+        | list
+      }}
 
-  - name: netbox response
-    debug:
-      var: netbox_response
-
-
- 
-  - name: Extract and format ACL lines
-    set_fact:
-      acl_lines: >-
-        {{
-          netbox_response.json.results
-          | map(attribute='address')
-          | map('split', '/')
-          | map('first')
-          | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))
-          | map('reverse')
-          | map('join', ' permit ip host ')
-          | map('regex_replace', '^', '')  
-          | map('regex_replace', '$', ' any')
-          | list
-        }}
-
-
-
-  - name: Debug formatted ACL lines
-    debug:
-      var: acl_lines
-
-
-
-  - name: Check if ACL exists
-    nxos_command:
-      commands:
-        - "show running-config | include 'ip access-list {{ snmp_acl_name }}'"
-    register: acl_check
-
-  - name: Remove ACL if it exists
-    nxos_config:
-      lines:
-        - "no ip access-list {{ snmp_acl_name }}"
-    when: acl_check.stdout[0] != ""
+- name: Debug formatted ACL lines
+  debug:
+    var: acl_lines
 
 
+# ------------------------------------------------------------
+# ACL recreate (replace block)
+# ------------------------------------------------------------
+- name: Check if ACL exists
+  nxos_command:
+    commands:
+      - "show running-config | include 'ip access-list {{ nxos_snmp.acl.name }}'"
+  register: acl_check
 
-  - name: Create/Update ACL for SNMP
-    nxos_config:
-      lines: "{{ acl_lines }}"
-      parents: ['ip access-list {{ snmp_acl_name }}']
-      match: none
-      replace: block
+- name: Remove ACL if it exists
+  nxos_config:
+    lines:
+      - "no ip access-list {{ nxos_snmp.acl.name }}"
+  when: acl_check.stdout[0] != ""
+  ignore_errors: true
 
-  - name: Set SNMP location
-    nxos_config:
-      lines:
-        - snmp-server location {{ SNMP_LOCATION }}
-      before:
-        - no snmp-server location
-      match: strict
-      replace: block
-    ignore_errors: true
+- name: Add SNMP ACL entries one at a time
+  nxos_config:
+    parents:
+      - "ip access-list {{ nxos_snmp.acl.name }}"
+    lines:
+      - "{{ item }}"
+    match: line
+    replace: line
+  loop: "{{ acl_lines }}"
+  loop_control:
+    label: "{{ item }}"
 
-  - name: Set SNMP  globalEnforcePriv
-    nxos_config:
-       lines:
-         - snmp-server globalEnforcePriv 
-    ignore_errors: true
+# ------------------------------------------------------------
+# Global SNMP settings
+# ------------------------------------------------------------
+- name: Set SNMP location (device config)
+  nxos_config:
+    lines:
+      - "snmp-server location {{ SNMP_LOCATION }}"
+    before:
+      - "no snmp-server location"
+    match: strict
+    replace: block
+  when: SNMP_LOCATION is defined
+  ignore_errors: true
 
-
-
-  - name: add snmp user {{ snmp_ro_user }}
-    nxos_config:
-      lines:
-        - snmp-server user {{ snmp_ro_user }} {{ snmp_nexus_ro_group }} auth sha {{ snmp_auth_passphrase_ro }} priv aes-128 {{ snmp_priv_passphrase_ro }}	       
-    ignore_errors: true
-
-
-  - name: DEBUG | snmp user 
-    debug:
-      msg:
-        - snmp-server user {{ snmp_ro_user }} {{ snmp_nexus_ro_group }} auth sha {{ snmp_auth_passphrase_ro }} priv aes-128 {{ snmp_priv_passphrase_ro }}
-
-
-  - name: Set SNMP user {{ snmp_ro_user  }} ACL
-    nxos_config:
-       lines:
-         - snmp-server user  {{ snmp_ro_user  }} use-ipv4acl {{ snmp_acl_name }}
-       match: strict
-       replace: block
-    ignore_errors: true
-
-
-  - name: Set SNMP user {{ snmp_rw_user }}
-    nxos_config:
-       lines:
-         - snmp-server user {{ snmp_rw_user }} {{ snmp_nexus_rw_group }} auth sha {{ snmp_auth_passphrase_rw }} priv aes-128 {{ snmp_priv_passphrase_rw }}	
-       match: strict
-       replace: block
-    ignore_errors: true
+- name: Set SNMP globalEnforcePriv
+  nxos_config:
+    lines:
+      - "snmp-server globalEnforcePriv"
+  ignore_errors: true
 
 
-  - name: Set SNMP user {{ snmp_rw_user }} ACL
-    nxos_config:
-       lines:
-         - snmp-server user  {{ snmp_rw_user }} use-ipv4acl {{ snmp_acl_name }}
-       match: strict
-       replace: block
-    ignore_errors: true
 
- 
+# ------------------------------------------------------------
+# Users (looped from nxos_snmp.users)
+# - access selects the group: ro/rw -> nxos_snmp.groups.ro/rw
+# - AES uses bits: aes-128, aes-256, etc.
+# ------------------------------------------------------------
+- name: Configure SNMPv3 users from nxos_snmp.users
+  nxos_config:
+    lines:
+      - >-
+        snmp-server user {{ item.username }}
+        {{ nxos_snmp.groups[item.access] }}
+        auth {{ item.auth_proto | lower }} {{ item.auth_pass }}
+        priv {{
+          (item.priv_proto | lower ~ '-' ~ (item.priv_bits | default(128) | string))
+          if (item.priv_proto | lower) == 'aes'
+          else (item.priv_proto | lower)
+        }} {{ item.priv_pass }}
+  loop: "{{ nxos_snmp.users }}"
+  ignore_errors: true
+
+- name: DEBUG | Rendered SNMP user commands
+  debug:
+    msg:
+      - >-
+        snmp-server user {{ item.username }}
+        {{ nxos_snmp.groups[item.access] }}
+        auth {{ item.auth_proto | lower }} {{ item.auth_pass }}
+        priv {{
+          (item.priv_proto | lower ~ '-' ~ (item.priv_bits | default(128) | string))
+          if (item.priv_proto | lower) == 'aes'
+          else (item.priv_proto | lower)
+        }} {{ item.priv_pass }}
+  loop: "{{ nxos_snmp.users }}"
+
+- name: Apply IPv4 ACL to each SNMP user
+  nxos_config:
+    lines:
+      - "snmp-server user {{ item.username }} use-ipv4acl {{ nxos_snmp.acl.name }}"
+    match: strict
+    replace: block
+  loop: "{{ nxos_snmp.users }}"
+  ignore_errors: true
+
+# ------------------------------------------------------------
+# Optional per-user SNMP host target (if item.host is defined)
+# NOTE: This is for traps/informs destinations, not polling permission.
+# ------------------------------------------------------------
+- name: Configure SNMP host targets (optional per-user)
+  nxos_config:
+    lines:
+      - "snmp-server host {{ item.host }} version 3 priv {{ item.username }}"
+    match: line
+  loop: "{{ nxos_snmp.users }}"
+  when:
+    - item.host is defined
+    - item.host | length > 0
+  ignore_errors: true
+
+# ------------------------------------------------------------
+# Keep your original "admin" ACL binding (optional)
+# ------------------------------------------------------------
+- name: Set SNMP user admin ACL
+  nxos_config:
+    lines:
+      - "snmp-server user admin use-ipv4acl {{ nxos_snmp.acl.name }}"
+    match: strict
+    replace: block
+  ignore_errors: true
+
+# ------------------------------------------------------------
+# Add users with ACL
+# ------------------------------------------------------------
+
+- name: Apply IPv4 ACL to each SNMP user (NX-OS)
+  cisco.nxos.nxos_config:
+    lines:
+      - "snmp-server user {{ item.username }} use-ipv4acl {{ nxos_snmp.acl.name }}"
+    match: line
+  loop: "{{ nxos_snmp.users }}"
+
+
+
+
+
+
+
+# ------------------------------------------------------------------------
+# NX-OS CLEANUP: remove SNMPv3 users NOT in nxos_snmp.users
+# Controlled by: nxos_snmp_cleanup: true
+# ------------------------------------------------------------------------
+
+- name: Cleanup | Gather SNMP users (NX-OS table)
+  cisco.nxos.nxos_command:
+    commands:
+      - "show snmp user"
+  register: snmp_users_show
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+- name: Cleanup | Trim first 5 lines from show snmp user output
+  set_fact:
+    snmp_users_show: >-
+      {{
+        snmp_users_show
+        | combine({
+            'stdout_lines': [
+              (snmp_users_show.stdout_lines[0] | default([]))[6:]
+            ]
+          }, recursive=True)
+      }}
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+- name: Cleanup | Trim last 5 lines from show snmp user output
+  set_fact:
+    snmp_users_show: >-
+      {{
+        snmp_users_show
+        | combine({
+            'stdout_lines': [
+              (snmp_users_show.stdout_lines[0] | default([]))[:-6]
+            ]
+          }, recursive=True)
+      }}
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+
+
+- name: Cleanup | DEBUG trimmed stdout_lines list
+  debug:
+    var: snmp_users_show.stdout_lines[0]
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+
+
+- name: Cleanup | Build desired SNMP username list
+  set_fact:
+    desired_snmp_usernames: "{{ nxos_snmp.users | map(attribute='username') | list }}"
+  when: nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | Build existing SNMP username list (parse first column)
+  set_fact:
+    existing_snmp_usernames: >-
+      {{
+        (snmp_users_show.stdout_lines[0] | default([]))
+        | map('trim')
+        | reject('match', '^$')
+        | reject('search', '^_+')
+        | reject('search', '^SNMP USERS')
+        | reject('search', '^NOTIFICATION TARGET USERS')
+        | reject('search', '^User\\s+Auth\\s+Priv')
+        | reject('search', '^____')
+        | select('match', '^[A-Za-z0-9]')
+        | map('split')
+        | map('first')
+        | list
+        | unique
+      }}
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+
+# - name: Cleanup | Build existing SNMP username list (parse user rows only)
+#   set_fact:
+#     existing_snmp_usernames: >-
+#       {{
+#         (snmp_users_show.stdout_lines[0] | default([]))
+#         | map('trim')
+#         | reject('match', '^$')
+#         | reject('match', '^_+$')
+#         | select('match', '^[A-Za-z0-9][A-Za-z0-9._-]*\\s+(md5|sha|noauth)\\b')
+#         | map('split')
+#         | map('first')
+#         | list
+#         | unique
+#       }}
+#   when: nxos_snmp_cleanup | default(false) | bool
+
+
+- name: Cleanup | Set protected users list
+  set_fact:
+    protected_users: "{{ nxos_snmp_protected_users | default(['admin']) }}"
+  when: nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | Compute SNMP users to remove
+  set_fact:
+    snmp_users_to_remove: >-
+      {{
+        (existing_snmp_usernames | difference(desired_snmp_usernames))
+        | difference(protected_users)
+      }}
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+# --- HOST CLEANUP (NX-OS) - reliable ---
+- name: Cleanup | Gather SNMP section from running-config (NX-OS)
+  cisco.nxos.nxos_command:
+    commands:
+      - "show running-config snmp"
+  register: snmp_run_snmp
+  when: nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | Extract SNMP host lines from SNMP section
+  set_fact:
+    existing_snmp_host_lines: >-
+      {{
+        (snmp_run_snmp.stdout_lines[0] | default([]))
+        | map('trim')
+        | select('match', '^snmp-server host ')
+        | list
+      }}
+  when: nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | DEBUG existing SNMP host lines
+  debug:
+    var: existing_snmp_host_lines
+  when: nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | Remove SNMP host statements that reference removed users
+  cisco.nxos.nxos_config:
+    lines: >-
+      {{
+        existing_snmp_host_lines
+        | select('search', '\\b(' ~ (snmp_users_to_remove | map('regex_escape') | join('|')) ~ ')\\b')
+        | map('regex_replace', '^(.*)$', 'no \\1')
+        | list
+      }}
+    match: none
+  when:
+    - nxos_snmp_cleanup | default(false) | bool
+    - snmp_users_to_remove is defined
+    - snmp_users_to_remove | length > 0
+
+- name: Cleanup | DEBUG lists (sanity check)
+  debug:
+    msg:
+      - "Desired: {{ desired_snmp_usernames }}"
+      - "Existing: {{ existing_snmp_usernames }}"
+      - "Protected: {{ protected_users }}"
+      - "To remove: {{ snmp_users_to_remove }}"
+  when: nxos_snmp_cleanup | default(false) | bool
+
+# IMPORTANT: remove by USERNAME ONLY (do NOT try to remove full config lines)
+# This is the safest form on NX-OS and avoids 'remove last group' issues. [1](https://community.spiceworks.com/t/cisco-layer-3-switch-purge-snmp-configuration/658909)
+- name: Cleanup | Remove unused SNMPv3 users (username only)
+  cisco.nxos.nxos_config:
+    lines: "{{ snmp_users_to_remove | map('regex_replace', '^(.*)$', 'no snmp-server user \\1') | list }}"
+    match: none
+  when:
+    - nxos_snmp_cleanup | default(false) | bool
+    - snmp_users_to_remove is defined
+    - snmp_users_to_remove | length > 0
+  register: snmp_user_remove_result
+  ignore_errors: true
+
+- name: Cleanup | Verify SNMP users after removal
+  cisco.nxos.nxos_command:
+    commands:
+      - "show snmp user"
+  register: snmp_users_show_after
+  when:
+    - nxos_snmp_cleanup | default(false) | bool
+
+- name: Cleanup | DEBUG post-check
+  debug:
+    var: snmp_users_show_after.stdout_lines[0]
+  when: nxos_snmp_cleanup | default(false) | bool
+
+
+
 
   
-  - name: Set SNMP user catctruser
-    nxos_config:
-       lines:
-         - snmp-server user {{ CAT_SNMP_USER }} network-admin auth {{ CAT_SNMP_AUTH_PROTO }} {{CAT_SNMP_AUTH_KEY}} priv {{CAT_SNMP_PRIV_PROTO}}-{{CAT_SNMP_PRIV_BITS}} {{CAT_SNMP_PRIV_KEY}}
-       match: strict       
-       replace: block
-    ignore_errors: true
 
+- name: Display device under test
+  debug:
+    msg: "Testing SNMPv3 against {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"
 
-  - name: Set SNMP user catctruser ACL
-    nxos_config:
-       lines:
-         - snmp-server user  {{ CAT_SNMP_USER }} use-ipv4acl {{ snmp_acl_name }}
-       match: strict
-       replace: block
-    ignore_errors: true
+- name: Test SNMPv3 users
+  delegate_to: localhost
+  vars:
+    nxos_snmp_target: "{{ item.host | default(ansible_host | default(inventory_hostname)) }}"
+  ansible.builtin.command: >
+    snmpwalk
+    -v3
+    -l authPriv
+    -u {{ item.username }}
+    -a {{ item.auth_proto | upper }}
+    -A {{ item.auth_pass }}
+    -x {{ item.priv_proto | upper }}
+    {% if item.priv_bits is defined %}
+    -X {{ item.priv_pass }}
+    {% else %}
+    -X {{ item.priv_pass }}
+    {% endif %}
+    {{ nxos_snmp_target }}
+    {{ nxos_snmp_oid_test }}
+  register: nxos_snmp_test
+  changed_when: false
+  failed_when:
+    - nxos_snmp_test.rc != 0
+  loop: "{{ ios_snmp.users }}"
+  loop_control:
+    label: "{{ item.username }}"
 
-
-  - name: Set SNMP user admin ACL
-    nxos_config:
-       lines:
-         - snmp-server user  admin use-ipv4acl {{ snmp_acl_name }}
-       match: strict
-       replace: block
-    ignore_errors: true
-
-
-
-
-
-
-
-
-
-
-
-
-
- 
-
-
-
-
-
-
-
-
-
-
-
-
+- name: Report SNMPv3 test results
+  delegate_to: localhost
+  debug:
+    msg: |
+      ✅ SNMPv3 SUCCESS
+      User : {{ item.item.username }}
+      Host : {{ item.item.host | default(ansible_host | default(inventory_hostname)) }}
+      OID  : {{ ios_snmp_oid_test }}
+  loop: "{{ ios_snmp_test.results }}"
+  when: item.rc == 0  

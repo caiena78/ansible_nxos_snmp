@@ -25,4 +25,64 @@ CAT_SNMP_PRIV_PROTO: aes
 CAT_SNMP_PRIV_BITS: 128
 CAT_SNMP_PRIV_KEY: <prive_key>
 
+nxos_snmp_protected_users: []
+  
+nxos_snmp_oid_test: "1.3.6.1.2.1.1.1.0"
 
+
+nxos_snmp_cleanup: false
+
+nxos_snmp:
+  # ------------------------------------------------------------
+  # ACL (built via NetBox elsewhere, referenced here by name)
+  # ------------------------------------------------------------
+  acl:
+    name: MANAGEMENT
+    tag: snmp_acl_allow
+
+  # ------------------------------------------------------------
+  # Views
+  # ------------------------------------------------------------
+  views:
+    ro: ROview
+    rw: RWview
+
+  # ------------------------------------------------------------
+  # Groups
+  # ------------------------------------------------------------
+  groups:
+    ro: network-operator
+    rw: network-admin
+
+  group_context:
+    enabled: true
+    prefix: "vlan-"
+
+  # ------------------------------------------------------------
+  # Standard SNMPv3 users (RO / RW)
+  # ------------------------------------------------------------
+  users:
+    - username: ROuser
+      access: ro
+      auth_proto: sha
+      auth_pass: "password"
+      priv_proto: aes
+      priv_bits: 128
+      priv_pass: "password"
+
+    - username: RWuser
+      access: rw
+      auth_proto: sha
+      auth_pass: "password"
+      priv_proto: aes
+      priv_bits: 128
+      priv_pass: "password"
+
+    - username: user1
+      access: rw
+      auth_proto: sha
+      auth_pass: "password"
+      priv_proto: aes
+      priv_bits: 128
+      priv_pass: "password"       
+      host: 1.2.3.4

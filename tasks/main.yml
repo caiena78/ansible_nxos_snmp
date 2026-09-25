@@ -19,72 +19,13 @@
     - netbox_site_response.json.custom_fields.SNMP_LOCATION | length > 0
 
 # ------------------------------------------------------------
-# Pull ACL IPs from NetBox by tag (nxos_snmp.acl.tag)
+# MANAGEMENT ACL: build/update via mgnt_acl role (NetBox-sourced)
 # ------------------------------------------------------------
-- name: Get IPs tagged with {{ nxos_snmp.acl.tag }} from NetBox
-  uri:
-    url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ nxos_snmp.acl.tag }}"
-    method: GET
-    headers:
-      Authorization: "Token {{ netbox_token }}"
-      Accept: "application/json"
-    return_content: yes
-  register: netbox_response
-
-- name: netbox response
-  debug:
-    var: netbox_response
-
-# ------------------------------------------------------------
-# Build ACL lines: 10 permit ip host <ip> any, 20 permit..., etc.
-# ------------------------------------------------------------
-- name: Extract and format ACL lines
-  set_fact:
-    acl_lines: >-
-      {{
-        netbox_response.json.results
-        | map(attribute='address')
-        | map('split', '/')
-        | map('first')
-        | zip(range(10, (netbox_response.json.results | length * 10) + 1, 10))
-        | map('reverse')
-        | map('join', ' permit ip host ')
-        | map('regex_replace', '$', ' any')
-        | list
-      }}
-
-- name: Debug formatted ACL lines
-  debug:
-    var: acl_lines
-
-
-# ------------------------------------------------------------
-# ACL recreate (replace block)
-# ------------------------------------------------------------
-- name: Check if ACL exists
-  nxos_command:
-    commands:
-      - "show running-config | include 'ip access-list {{ nxos_snmp.acl.name }}'"
-  register: acl_check
-
-- name: Remove ACL if it exists
-  nxos_config:
-    lines:
-      - "no ip access-list {{ nxos_snmp.acl.name }}"
-  when: acl_check.stdout[0] != ""
-  ignore_errors: true
-
-- name: Add SNMP ACL entries one at a time
-  nxos_config:
-    parents:
-      - "ip access-list {{ nxos_snmp.acl.name }}"
-    lines:
-      - "{{ item }}"
-    match: line
-    replace: line
-  loop: "{{ acl_lines }}"
-  loop_control:
-    label: "{{ item }}"
+- name: Create/update management ACL
+  ansible.builtin.include_role:
+    name: mgnt_acl
+  vars:
+    mgnt_acl: "{{ nxos_snmp.acl }}"
 
 # ------------------------------------------------------------
 # Global SNMP settings
@@ -188,7 +129,106 @@
     match: line
   loop: "{{ nxos_snmp.users }}"
 
+# ------------------------------------------------------------------------
+# CISCO ISE: sync SNMPv3 polling credentials for this device
+# Users flagged with `cisco_ise: true` in nxos_snmp.users are the
+# credentials Cisco ISE should use to poll this device via SNMPv3.
+# ------------------------------------------------------------------------
+- name: Determine SNMPv3 user(s) designated for Cisco ISE
+  set_fact:
+    ise_snmp_users: "{{ nxos_snmp.users | selectattr('cisco_ise', 'defined') | selectattr('cisco_ise') | list }}"
 
+- name: Sync SNMPv3 credentials to Cisco ISE
+  when: ise_snmp_users | length > 0
+  block:
+    - name: Set desired ISE SNMP user (first flagged user)
+      set_fact:
+        ise_snmp_user: "{{ ise_snmp_users | first }}"
+
+    - name: Map SNMPv3 protocols to Cisco ISE values
+      set_fact:
+        ise_snmp_auth_protocol: "{{ ise_snmp_user.auth_proto | upper }}"
+        ise_snmp_priv_protocol: >-
+          {{
+            ('AES' ~ (ise_snmp_user.priv_bits | default(128) | string))
+            if (ise_snmp_user.priv_proto | lower) == 'aes'
+            else (ise_snmp_user.priv_proto | upper)
+          }}
+
+    - name: Check if device exists in Cisco ISE by IP
+      ansible.builtin.uri:
+        url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice?filter=ipaddress.EQ.{{ ansible_host }}"
+        method: GET
+        url_username: "{{ ise_username }}"
+        url_password: "{{ ise_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ ise_verify }}"
+        headers:
+          Accept: "application/json"
+        status_code: 200
+      register: ise_snmp_ip_check
+      delegate_to: localhost
+
+    - name: Set ISE device-found flag
+      set_fact:
+        ise_snmp_device_found: "{{ ise_snmp_ip_check.json.SearchResult.total | int > 0 }}"
+
+    - name: Get full device record from Cisco ISE
+      ansible.builtin.uri:
+        url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_snmp_ip_check.json.SearchResult.resources[0].id }}"
+        method: GET
+        url_username: "{{ ise_username }}"
+        url_password: "{{ ise_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ ise_verify }}"
+        headers:
+          Accept: "application/json"
+        status_code: 200
+      register: ise_snmp_device_details
+      delegate_to: localhost
+      when: ise_snmp_device_found
+
+    - name: Build updated SNMP settings for Cisco ISE
+      set_fact:
+        ise_snmp_settings: >-
+          {{
+            (ise_snmp_device_details.json.NetworkDevice.snmpsettings | default({}))
+            | combine({
+                'version': 'THREE',
+                'v3Query': {
+                  'userName': ise_snmp_user.username,
+                  'securityLevel': 'AuthPriv',
+                  'authProtocol': ise_snmp_auth_protocol,
+                  'authPassword': ise_snmp_user.auth_pass,
+                  'privacyProtocol': ise_snmp_priv_protocol,
+                  'privacyPassword': ise_snmp_user.priv_pass
+                }
+              }, recursive=True)
+          }}
+      when: ise_snmp_device_found
+
+    - name: Push updated SNMP settings to Cisco ISE
+      ansible.builtin.uri:
+        url: "https://{{ ise_hostname }}:{{ ise_port }}/ers/config/networkdevice/{{ ise_snmp_device_details.json.NetworkDevice.id }}"
+        method: PUT
+        url_username: "{{ ise_username }}"
+        url_password: "{{ ise_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ ise_verify }}"
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          NetworkDevice: "{{ ise_snmp_device_details.json.NetworkDevice | combine({'snmpsettings': ise_snmp_settings}) }}"
+        status_code: [200, 201]
+      delegate_to: localhost
+      when: ise_snmp_device_found
+
+    - name: Warn if device was not found in Cisco ISE by IP
+      debug:
+        msg: "{{ ansible_host }} not found in Cisco ISE (by IP) - skipped SNMP settings sync for user {{ ise_snmp_user.username }}"
+      when: not ise_snmp_device_found
 
 
 

@@ -138,6 +138,11 @@
   set_fact:
     ise_snmp_users: "{{ nxos_snmp.users | selectattr('cisco_ise', 'defined') | selectattr('cisco_ise') | list }}"
 
+- name: Skip message if no SNMPv3 user is flagged for Cisco ISE
+  debug:
+    msg: "No user in nxos_snmp.users has cisco_ise: true - skipping Cisco ISE SNMP sync"
+  when: ise_snmp_users | length == 0
+
 - name: Sync SNMPv3 credentials to Cisco ISE
   when: ise_snmp_users | length > 0
   block:
@@ -195,15 +200,13 @@
             (ise_snmp_device_details.json.NetworkDevice.snmpsettings | default({}))
             | combine({
                 'version': 'THREE',
-                'v3Query': {
-                  'userName': ise_snmp_user.username,
-                  'securityLevel': 'AuthPriv',
-                  'authProtocol': ise_snmp_auth_protocol,
-                  'authPassword': ise_snmp_user.auth_pass,
-                  'privacyProtocol': ise_snmp_priv_protocol,
-                  'privacyPassword': ise_snmp_user.priv_pass
-                }
-              }, recursive=True)
+                'username': ise_snmp_user.username,
+                'securityLevel': 'PRIV',
+                'authProtocol': ise_snmp_auth_protocol,
+                'authPassword': ise_snmp_user.auth_pass,
+                'privacyProtocol': ise_snmp_priv_protocol,
+                'privacyPassword': ise_snmp_user.priv_pass
+              })
           }}
       when: ise_snmp_device_found
 
@@ -222,8 +225,28 @@
         body:
           NetworkDevice: "{{ ise_snmp_device_details.json.NetworkDevice | combine({'snmpsettings': ise_snmp_settings}) }}"
         status_code: [200, 201]
+      register: ise_snmp_put_result
       delegate_to: localhost
+      ignore_errors: true
       when: ise_snmp_device_found
+
+    - name: Log full ISE response for troubleshooting on failure
+      ansible.builtin.copy:
+        content: "{{ ise_snmp_put_result | to_nice_json }}"
+        dest: "{{ playbook_dir }}/logs/ise_snmp_put_{{ inventory_hostname }}.json"
+      delegate_to: localhost
+      when:
+        - ise_snmp_device_found
+        - ise_snmp_put_result is failed
+
+    - name: Fail if Cisco ISE SNMP update failed
+      ansible.builtin.fail:
+        msg: >-
+          Failed to update SNMP settings in Cisco ISE for {{ inventory_hostname }}.
+          Full response logged to {{ playbook_dir }}/logs/ise_snmp_put_{{ inventory_hostname }}.json
+      when:
+        - ise_snmp_device_found
+        - ise_snmp_put_result is failed
 
     - name: Warn if device was not found in Cisco ISE by IP
       debug:

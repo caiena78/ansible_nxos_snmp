@@ -1,7 +1,8 @@
----  
+---
 netbox_url: "https://netbox.example.com"
 netbox_token: "your_token_here"
 netbox_validate_certs: false
+Version: 1.0
 snmp_nexus_rw_group: "network-admin"
 snmp_nexus_ro_group: "network-operator"
 snmp_rw_user: "RWuser"

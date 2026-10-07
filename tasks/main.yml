@@ -1,5 +1,9 @@
 ---
 
+- name: Show nxos_snmp role version
+  debug:
+    msg: "nxos_snmp role version {{ Version }}"
+
 - name: Include netbox_getsite
   include_role:
     name: netbox_getsite

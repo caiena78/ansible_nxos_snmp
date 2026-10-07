@@ -177,6 +177,14 @@
         status_code: 200
       register: ise_snmp_ip_check
       delegate_to: localhost
+      vars:
+        # Must be set as a var, not the "connection:" keyword: when localhost
+        # is an explicit inventory host, group_vars/all.yml's
+        # ansible_connection (network_cli) applies to it as a variable, and a
+        # variable overrides the connection keyword - leaving the delegated
+        # task on network_cli and failing with "Unable to automatically
+        # determine host network os".
+        ansible_connection: local
 
     - name: Set ISE device-found flag
       set_fact:
@@ -195,6 +203,14 @@
         status_code: 200
       register: ise_snmp_device_details
       delegate_to: localhost
+      vars:
+        # Must be set as a var, not the "connection:" keyword: when localhost
+        # is an explicit inventory host, group_vars/all.yml's
+        # ansible_connection (network_cli) applies to it as a variable, and a
+        # variable overrides the connection keyword - leaving the delegated
+        # task on network_cli and failing with "Unable to automatically
+        # determine host network os".
+        ansible_connection: local
       when: ise_snmp_device_found
 
     - name: Build updated SNMP settings for Cisco ISE
@@ -231,6 +247,14 @@
         status_code: [200, 201]
       register: ise_snmp_put_result
       delegate_to: localhost
+      vars:
+        # Must be set as a var, not the "connection:" keyword: when localhost
+        # is an explicit inventory host, group_vars/all.yml's
+        # ansible_connection (network_cli) applies to it as a variable, and a
+        # variable overrides the connection keyword - leaving the delegated
+        # task on network_cli and failing with "Unable to automatically
+        # determine host network os".
+        ansible_connection: local
       ignore_errors: true
       when: ise_snmp_device_found
 
@@ -239,6 +263,14 @@
         content: "{{ ise_snmp_put_result | to_nice_json }}"
         dest: "{{ playbook_dir }}/logs/ise_snmp_put_{{ inventory_hostname }}.json"
       delegate_to: localhost
+      vars:
+        # Must be set as a var, not the "connection:" keyword: when localhost
+        # is an explicit inventory host, group_vars/all.yml's
+        # ansible_connection (network_cli) applies to it as a variable, and a
+        # variable overrides the connection keyword - leaving the delegated
+        # task on network_cli and failing with "Unable to automatically
+        # determine host network os".
+        ansible_connection: local
       when:
         - ise_snmp_device_found
         - ise_snmp_put_result is failed
